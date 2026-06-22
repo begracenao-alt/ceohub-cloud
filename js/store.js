@@ -88,6 +88,10 @@
     } catch (e) {
       alert("保存に失敗しました。ブラウザの空き容量をご確認ください。");
     }
+    // クラウド（Firebase）にも保存
+    if (window.bgCloud && window.bgCloud.saveData) {
+      try { window.bgCloud.saveData(data); } catch (e) {}
+    }
     if (data.sync && data.sync.enabled && data.sync.url) {
       pushToSheet(); // 失敗してもローカルは守られる
     }
