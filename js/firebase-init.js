@@ -139,27 +139,53 @@
       auth_.signOut(auth);
     });
 
-    // クラウド書き込みのスロットル（連続更新を1秒にまとめる）
-    var pendingSave = null;
-    var saveTimer = null;
-    function scheduleCloudSave(data) {
-      pendingSave = data;
-      if (saveTimer) return;
-      saveTimer = setTimeout(function () {
-        var snapshot = pendingSave;
-        pendingSave = null;
-        saveTimer = null;
+    // BODY 系（個人エリアにだけ保存して 共有されない）
+    var PRIVATE_KEYS = ["bodyLogs", "bodyMoves"];
+
+    function splitData(data) {
+      var shared = {};
+      var priv = {};
+      Object.keys(data || {}).forEach(function (k) {
+        if (PRIVATE_KEYS.indexOf(k) >= 0) priv[k] = data[k];
+        else shared[k] = data[k];
+      });
+      return { shared: shared, priv: priv };
+    }
+
+    function mergeData(shared, priv) {
+      var d = {};
+      if (shared) Object.keys(shared).forEach(function (k) { d[k] = shared[k]; });
+      if (priv) Object.keys(priv).forEach(function (k) { d[k] = priv[k]; });
+      return d;
+    }
+
+    // クラウド書き込みのスロットル（共有用と個人用、別々に）
+    var pending = { hubs: null, personal: null };
+    var timers = { hubs: null, personal: null };
+    function scheduleSave(col, data) {
+      pending[col] = data;
+      if (timers[col]) return;
+      timers[col] = setTimeout(function () {
+        var snapshot = pending[col];
+        pending[col] = null;
+        timers[col] = null;
         var user = auth.currentUser;
         if (!user || !snapshot) return;
         setSyncMark("☁ 同期中…");
-        fs_.setDoc(fs_.doc(db, "hubs", user.uid), { json: JSON.stringify(snapshot), at: Date.now() })
+        fs_.setDoc(fs_.doc(db, col, user.uid), { json: JSON.stringify(snapshot), at: Date.now() })
           .then(function () { setSyncMark("☁ 同期 OK"); })
           .catch(function (e) { setSyncMark("⚠ 同期エラー"); console.warn(e); });
       }, 1000);
     }
+    function scheduleCloudSave(data) {
+      var s = splitData(data);
+      scheduleSave("hubs", s.shared);
+      scheduleSave("personal", s.priv);
+    }
 
     // 公開API
-    var unsubscribe = null;
+    var unsubscribeHubs = null;
+    var unsubscribePersonal = null;
     window.bgCloud = {
       isLoggedIn: function () { return !!auth.currentUser; },
       saveData: scheduleCloudSave,
@@ -176,19 +202,27 @@
         if (!loaded) {
           sessionStorage.setItem("bgCloudLoaded", "1");
           setSyncMark("☁ 読み込み中…");
-          fs_.getDoc(fs_.doc(db, "hubs", user.uid)).then(function (snap) {
-            if (snap.exists()) {
-              var cloud = snap.data();
-              if (cloud && cloud.json) {
-                var current = localStorage.getItem("begrace_ceo_hub_v1");
-                if (current !== cloud.json) {
-                  try {
-                    localStorage.setItem("begrace_ceo_hub_v1", cloud.json);
-                    setSyncMark("☁ 同期 OK");
-                    location.reload();
-                    return;
-                  } catch (e) {}
-                }
+          Promise.all([
+            fs_.getDoc(fs_.doc(db, "hubs", user.uid)),
+            fs_.getDoc(fs_.doc(db, "personal", user.uid))
+          ]).then(function (snaps) {
+            var sharedCloud = snaps[0].exists() && snaps[0].data().json ? JSON.parse(snaps[0].data().json) : null;
+            var privCloud = snaps[1].exists() && snaps[1].data().json ? JSON.parse(snaps[1].data().json) : null;
+            if (sharedCloud || privCloud) {
+              var currentJson = localStorage.getItem("begrace_ceo_hub_v1");
+              var currentObj = {};
+              try { currentObj = currentJson ? JSON.parse(currentJson) : {}; } catch (e) {}
+              var currentSplit = splitData(currentObj);
+              // クラウドに存在する分は上書き、ないところはローカルを残す
+              var merged = mergeData(sharedCloud || currentSplit.shared, privCloud || currentSplit.priv);
+              var mergedJson = JSON.stringify(merged);
+              if (currentJson !== mergedJson) {
+                try {
+                  localStorage.setItem("begrace_ceo_hub_v1", mergedJson);
+                  setSyncMark("☁ 同期 OK");
+                  location.reload();
+                  return;
+                } catch (e) {}
               }
             }
             setSyncMark("☁ 同期 OK");
@@ -200,22 +234,40 @@
           setSyncMark("☁ 同期 OK");
         }
 
-        // リアルタイム監視（別端末からの変更を受信）
-        if (unsubscribe) unsubscribe();
-        unsubscribe = fs_.onSnapshot(fs_.doc(db, "hubs", user.uid), function (snap) {
-          if (!snap.exists() || !snap.metadata || snap.metadata.hasPendingWrites) return;
-          var cloud = snap.data();
-          if (!cloud || !cloud.json) return;
-          var current = localStorage.getItem("begrace_ceo_hub_v1");
-          if (current === cloud.json) return; // 同じなら何もしない
+        // リアルタイム監視（共有 + 個人 別々に）
+        function applyRemoteUpdate(field, value) {
+          var currentJson = localStorage.getItem("begrace_ceo_hub_v1");
+          var currentObj = {};
+          try { currentObj = currentJson ? JSON.parse(currentJson) : {}; } catch (e) {}
+          var currentSplit = splitData(currentObj);
+          var nextShared = field === "shared" ? value : currentSplit.shared;
+          var nextPriv = field === "priv" ? value : currentSplit.priv;
+          var merged = mergeData(nextShared, nextPriv);
+          var mergedJson = JSON.stringify(merged);
+          if (currentJson === mergedJson) return;
           try {
-            localStorage.setItem("begrace_ceo_hub_v1", cloud.json);
+            localStorage.setItem("begrace_ceo_hub_v1", mergedJson);
             setSyncMark("☁ 他端末から更新");
             setTimeout(function () { location.reload(); }, 500);
           } catch (e) {}
+        }
+        if (unsubscribeHubs) unsubscribeHubs();
+        unsubscribeHubs = fs_.onSnapshot(fs_.doc(db, "hubs", user.uid), function (snap) {
+          if (!snap.exists() || !snap.metadata || snap.metadata.hasPendingWrites) return;
+          var d = snap.data();
+          if (!d || !d.json) return;
+          try { applyRemoteUpdate("shared", JSON.parse(d.json)); } catch (e) {}
+        });
+        if (unsubscribePersonal) unsubscribePersonal();
+        unsubscribePersonal = fs_.onSnapshot(fs_.doc(db, "personal", user.uid), function (snap) {
+          if (!snap.exists() || !snap.metadata || snap.metadata.hasPendingWrites) return;
+          var d = snap.data();
+          if (!d || !d.json) return;
+          try { applyRemoteUpdate("priv", JSON.parse(d.json)); } catch (e) {}
         });
       } else {
-        if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+        if (unsubscribeHubs) { unsubscribeHubs(); unsubscribeHubs = null; }
+        if (unsubscribePersonal) { unsubscribePersonal(); unsubscribePersonal = null; }
         sessionStorage.removeItem("bgCloudLoaded");
         openLogin();
       }
