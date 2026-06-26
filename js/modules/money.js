@@ -38,10 +38,21 @@
     "地代家賃", "水道光熱費", "支払手数料", "研修費", "新聞図書費", "仕入", "減価償却費",
     "租税公課", "損害保険料", "修繕費", "荷造運賃", "福利厚生費", "給料賃金", "雑費"];
 
-  // 支払方法・受け取り方法（なお様が自分で追加・編集・削除できるリスト）
-  // 先頭に空欄を足して「選ばない」も選べるようにする
-  function payOpts() { return [""].concat(S.list("payMethods")); }
-  function recvOpts() { return [""].concat(S.list("receiveMethods")); }
+  // 支払方法・受け取り方法（一覧から選んでも、その場で打ち込んでもOK）
+  function payOpts() { return S.list("payMethods"); }
+  function recvOpts() { return S.list("receiveMethods"); }
+
+  // 入力された方法が一覧になければ、次回のために覚える（自動で追加）
+  function rememberMethod(kind, val) {
+    val = (val || "").trim();
+    if (!val) return;
+    var col = kind === "pay" ? "payMethods" : "receiveMethods";
+    var arr = S.list(col);
+    if (arr.indexOf(val) < 0) {
+      arr = arr.concat([val]);
+      if (kind === "pay") S.setPayMethods(arr); else S.setReceiveMethods(arr);
+    }
+  }
 
   // フォームは、その時点の最新リストで作る（関数にしておく）
   function saleFields() {
@@ -51,7 +62,7 @@
       { name: "product", label: "商品／サービス名", type: "text" },
       { name: "amount", label: "売上金額", type: "money" },
       { name: "dueDate", label: "入金予定日", type: "date" },
-      { name: "payMethod", label: "受け取り方法", type: "select", options: recvOpts() },
+      { name: "payMethod", label: "受け取り方法（選ぶ／打ち込みもOK）", type: "datalist", options: recvOpts(), placeholder: "一覧から選ぶか、打ち込めます（例：PayPal・あおぞら銀行）" },
       { name: "paid", label: "入金済み", type: "checkbox" },
       { name: "memo", label: "メモ", type: "textarea", full: true }
     ];
@@ -62,7 +73,7 @@
       { name: "content", label: "内容（何に使ったか）", type: "text" },
       { name: "amount", label: "金額", type: "money" },
       { name: "category", label: "勘定科目（選ぶ／自由に入力もOK）", type: "datalist", options: KANJO, placeholder: "一覧から選ぶか、入力もできます（例：外注工賃）" },
-      { name: "payMethod", label: "支払方法", type: "select", options: payOpts() },
+      { name: "payMethod", label: "支払方法（選ぶ／打ち込みもOK）", type: "datalist", options: payOpts(), placeholder: "一覧から選ぶか、打ち込めます（例：現金・Amex）" },
       { name: "memo", label: "メモ", type: "textarea", full: true }
     ];
   }
@@ -134,7 +145,11 @@
       '<div class="table-wrap"><table><thead><tr><th>勘定科目</th><th class="num">金額</th></tr></thead><tbody>' +
       catBody + '</tbody></table></div>' +
       '<p class="hint" style="margin:14px 0">この数字を、確定申告の「収支内訳書／青色申告決算書」にそのまま書き写せます。正確な区分・控除（家事按分・青色控除など）は、税理士さんや税務署にご確認ください。</p>' +
-      '<button class="btn btn-primary" id="csvOut">' + selYear + '年ぶんを書き出す（CSV／Excelで開けます）</button>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap">' +
+      '<button class="btn btn-primary" id="csvOut">' + selYear + '年の集計を書き出す（CSV）</button>' +
+      '<button class="btn" id="ledgerOut">📒 ' + selYear + '年の帳簿を書き出す（税理士さん用）</button>' +
+      '</div>' +
+      '<p class="hint" style="margin-top:10px">「帳簿」は、売上・経費を1件ずつ並べた明細です（売上帳・経費帳）。税理士さんに渡すときは、まず「この形でよいか・ほしい項目」を確認してもらうと安心です。青色申告の正式な帳簿（複式簿記での65万円控除など）は、この明細をもとに税理士さん・会計ソフトで仕上げる形になります。</p>' +
       '</div>';
 
     // 売上テーブル（画面内スクロール＝エンドレス防止）
@@ -142,7 +157,7 @@
     // 経費テーブル
     html += '<div class="card">' + U.sectionHead("経費", "経費を追加", "addExp") + tableExp() + clearBtn("expenses", "clrExp", "経費") + '</div>';
     // 支払方法・受け取り方法の編集
-    html += '<div style="text-align:right;margin:2px 0 10px"><button class="btn btn-sm" id="mgMethods">⚙️ 支払方法・受け取り方法を編集（追加・削除）</button></div>';
+    html += '<div style="text-align:right;margin:2px 0 10px"><button class="btn btn-sm" id="mgMethods">🛠 支払方法・受け取り方法の一覧を整える（削除・並べ替え）</button></div>';
     // 勘定科目の早見表（下に）
     html += hayamiHTML();
     // データを取り込む（コピー＆貼り付け）※いちばん下に
@@ -160,6 +175,7 @@
       b.onclick = function () { selYear = b.getAttribute("data-year"); render(view); };
     });
     document.getElementById("csvOut").onclick = function () { exportCSV(selYear); };
+    document.getElementById("ledgerOut").onclick = function () { exportLedger(selYear); };
     document.getElementById("mgMethods").onclick = function () { manageMethods(view); };
 
     // 取り込み（コピペ）
@@ -175,11 +191,11 @@
 
     document.getElementById("addSale").onclick = function () {
       U.recordModal({ title: "売上を追加", fields: saleFields(), values: { date: U.todayStr() },
-        onSave: function (v) { S.add("sales", v); U.toast("売上を追加しました"); render(view); } });
+        onSave: function (v) { rememberMethod("recv", v.payMethod); S.add("sales", v); U.toast("売上を追加しました"); render(view); } });
     };
     document.getElementById("addExp").onclick = function () {
       U.recordModal({ title: "経費を追加", fields: expFields(), values: { date: U.todayStr() },
-        onSave: function (v) { S.add("expenses", v); U.toast("経費を追加しました"); render(view); } });
+        onSave: function (v) { rememberMethod("pay", v.payMethod); S.add("expenses", v); U.toast("経費を追加しました"); render(view); } });
     };
     var cs2 = document.getElementById("clrSale");
     if (cs2) cs2.onclick = function () {
@@ -241,6 +257,37 @@
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
     U.toast(y + "年ぶんを書き出しました");
+  }
+
+  // 帳簿（取引明細）を書き出す ── 税理士さんに渡せる、1件ずつのきれいな表
+  function exportLedger(y) {
+    var sales = S.list("sales").filter(byYear(y)).slice().sort(function (a, b) { return (a.date || "").localeCompare(b.date || ""); });
+    var exp = S.list("expenses").filter(byYear(y)).slice().sort(function (a, b) { return (a.date || "").localeCompare(b.date || ""); });
+    var L = [];
+    L.push("Be Grace CEO Hub｜" + y + "年 帳簿（取引明細）");
+    L.push("");
+    L.push("【売上帳】");
+    L.push("日付,勘定科目,金額,摘要（商品・サービス）,取引先,受け取り方法,入金,入金予定日,メモ");
+    sales.forEach(function (r) {
+      L.push([csvCell(r.date), "売上高", U.num(r.amount), csvCell(r.product), csvCell(r.customer),
+        csvCell(r.payMethod), r.paid ? "入金済" : "未入金", csvCell(r.dueDate), csvCell(r.memo)].join(","));
+    });
+    L.push("売上 合計," + "," + U.num(sales.reduce(function (s, r) { return s + U.num(r.amount); }, 0)));
+    L.push("");
+    L.push("【経費帳】");
+    L.push("日付,勘定科目,金額,摘要（内容）,支払方法,メモ");
+    exp.forEach(function (r) {
+      L.push([csvCell(r.date), csvCell(r.category), U.num(r.amount), csvCell(r.content), csvCell(r.payMethod), csvCell(r.memo)].join(","));
+    });
+    L.push("経費 合計," + "," + U.num(exp.reduce(function (s, r) { return s + U.num(r.amount); }, 0)));
+    var blob = new Blob(["﻿" + L.join("\r\n")], { type: "text/csv;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "BeGrace_帳簿_" + y + ".csv";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    U.toast(y + "年の帳簿を書き出しました");
   }
 
   // 勘定科目の早見表
@@ -441,7 +488,7 @@
         var col = b.getAttribute("data-edit"), id = b.getAttribute("data-id");
         var fields = col === "sales" ? saleFields() : expFields();
         U.recordModal({ title: "編集", fields: fields, values: S.find(col, id),
-          onSave: function (v) { S.update(col, id, v); U.toast("更新しました"); render(view); } });
+          onSave: function (v) { rememberMethod(col === "sales" ? "recv" : "pay", v.payMethod); S.update(col, id, v); U.toast("更新しました"); render(view); } });
       };
     });
     view.querySelectorAll("[data-del]").forEach(function (b) {
